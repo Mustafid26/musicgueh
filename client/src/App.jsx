@@ -254,14 +254,24 @@ export default function App() {
     setIsResolving(true);
     try {
       const res = await fetch(`${API_BASE}/resolve?id=${track.id}`);
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
       const data = await res.json();
+      if (!data || !data.stream_url) {
+        throw new Error('No stream url received');
+      }
+
+      // Pastikan fallback thumbnail selalu ada URL valid
+      const safeThumbnail = data.thumbnail || `https://i.ytimg.com/vi/${data.id || track.id}/hqdefault.jpg`;
+      const cleanData = { ...data, thumbnail: safeThumbnail };
       
-      setCurrentTrack(data);
+      setCurrentTrack(cleanData);
       setIsPlaying(true);
       
       setRecentTracks(prev => {
-        const filtered = prev.filter(t => t.id !== data.id);
-        return [data, ...filtered].slice(0, 8);
+        const filtered = prev.filter(t => t.id !== cleanData.id);
+        return [cleanData, ...filtered].slice(0, 8);
       });
 
       const currentActive = getActiveAudio();
@@ -269,25 +279,33 @@ export default function App() {
       const nextAudio = nextDeck === 'A' ? audioRefA.current : audioRefB.current;
       const targetVol = isMuted ? 0 : volume;
 
+      if (!nextAudio) return;
+
       if (options.crossfade && currentActive && !currentActive.paused && currentActive.currentTime > 0) {
-        // Dual-deck DJ Crossfade (Fade out outgoing deck + Fade in incoming deck)
-        nextAudio.src = data.stream_url;
+        // Dual-deck DJ Crossfade
+        nextAudio.src = cleanData.stream_url;
         activeDeckRef.current = nextDeck;
         performCrossfade(nextAudio, currentActive, targetVol, 2000);
       } else {
         // Direct playback
         activeDeckRef.current = nextDeck;
         if (currentActive) {
-          currentActive.pause();
-          currentActive.volume = 0;
+          try {
+            currentActive.pause();
+            currentActive.volume = 0;
+          } catch (e) {}
         }
-        nextAudio.src = data.stream_url;
+        nextAudio.src = cleanData.stream_url;
         nextAudio.volume = targetVol;
-        nextAudio.play().catch(e => console.log('Playback error:', e));
+        nextAudio.play().catch(e => {
+          if (e.name !== 'AbortError') {
+            console.log('Playback error:', e);
+          }
+        });
       }
     } catch (err) {
       console.error('Resolve error:', err);
-      alert('Gagal mengambil audio stream tanpa iklan!');
+      // Hindari alert spam jika user klik cepat
     } finally {
       setIsResolving(false);
     }
@@ -390,17 +408,27 @@ export default function App() {
   useEffect(() => {
     if (!('mediaSession' in navigator) || !currentTrack) return;
 
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: currentTrack.title || 'MusicGueh Track',
-      artist: currentTrack.uploader || 'YouTube Music',
-      album: 'MusicGueh Ad-Free Player',
-      artwork: [
-        { src: currentTrack.thumbnail, sizes: '96x96', type: 'image/jpeg' },
-        { src: currentTrack.thumbnail, sizes: '128x128', type: 'image/jpeg' },
-        { src: currentTrack.thumbnail, sizes: '192x192', type: 'image/jpeg' },
-        { src: currentTrack.thumbnail, sizes: '512x512', type: 'image/jpeg' },
-      ]
-    });
+    try {
+      const artworkList = [];
+      const thumb = currentTrack.thumbnail || (currentTrack.id ? `https://i.ytimg.com/vi/${currentTrack.id}/hqdefault.jpg` : '');
+      if (thumb && typeof thumb === 'string' && thumb.startsWith('http')) {
+        artworkList.push(
+          { src: thumb, sizes: '96x96', type: 'image/jpeg' },
+          { src: thumb, sizes: '128x128', type: 'image/jpeg' },
+          { src: thumb, sizes: '192x192', type: 'image/jpeg' },
+          { src: thumb, sizes: '512x512', type: 'image/jpeg' }
+        );
+      }
+
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.title || 'MusicGueh Track',
+        artist: currentTrack.uploader || 'YouTube Music',
+        album: 'MusicGueh Ad-Free Player',
+        artwork: artworkList
+      });
+    } catch (e) {
+      console.log('MediaSession metadata error:', e);
+    }
 
     navigator.mediaSession.setActionHandler('play', () => {
       const active = getActiveAudio();

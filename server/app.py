@@ -88,12 +88,19 @@ def resolve_track(id: str = Query(..., description="ID video YouTube")):
 
             stream_url = info.get("url")
             # Fallback ke formats audio terbaik jika top-level url kosong
-            if not stream_url and "formats" in info:
-                audio_formats = [f for f in info["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+            if not stream_url and info.get("formats"):
+                formats_list = info.get("formats") or []
+                # 1. Cari direct audio stream (m4a / opus)
+                audio_formats = [f for f in formats_list if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
                 if audio_formats:
-                    # Ambil audio bitrate tertinggi
                     audio_formats.sort(key=lambda x: x.get("abr") or 0, reverse=True)
                     stream_url = audio_formats[0].get("url")
+                else:
+                    # 2. Fallback ke progressive video container (audio+video) yang memiliki audio
+                    progressive = [f for f in formats_list if f.get("acodec") != "none" and f.get("url")]
+                    if progressive:
+                        progressive.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
+                        stream_url = progressive[0].get("url")
 
             if not stream_url:
                 raise HTTPException(status_code=404, detail="Tidak ada audio stream yang dapat diekstrak")
