@@ -22,7 +22,7 @@ YDL_OPTS_SEARCH = {
     'quiet': True,
     'extract_flat': True,
     'skip_download': True,
-    'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
+    'extractor_args': {'youtube': {'player_client': ['tv', 'web_safari', 'android', 'ios']}},
 }
 
 YDL_OPTS_EXTRACT = {
@@ -31,7 +31,7 @@ YDL_OPTS_EXTRACT = {
     'quiet': True,
     'extract_flat': False,
     'skip_download': True,
-    'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
+    'extractor_args': {'youtube': {'player_client': ['tv', 'web_safari', 'android', 'ios']}},
 }
 
 # In-memory simple cache
@@ -80,44 +80,61 @@ def resolve_track(id: str = Query(..., description="ID video YouTube")):
         return STREAM_CACHE[id]
 
     video_url = f"https://www.youtube.com/watch?v={id}"
-    try:
-        with yt_dlp.YoutubeDL(YDL_OPTS_EXTRACT) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            if not info:
-                raise HTTPException(status_code=404, detail="Track tidak ditemukan")
+    
+    # Cek apakah ada cookies.txt di direktori server untuk bypass proteksi bot di VPS
+    cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-            stream_url = info.get("url")
-            # Fallback ke formats audio terbaik jika top-level url kosong
-            if not stream_url and info.get("formats"):
-                formats_list = info.get("formats") or []
-                # 1. Cari direct audio stream (m4a / opus)
-                audio_formats = [f for f in formats_list if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
-                if audio_formats:
-                    audio_formats.sort(key=lambda x: x.get("abr") or 0, reverse=True)
-                    stream_url = audio_formats[0].get("url")
-                else:
-                    # 2. Fallback ke progressive video container (audio+video) yang memiliki audio
-                    progressive = [f for f in formats_list if f.get("acodec") != "none" and f.get("url")]
-                    if progressive:
-                        progressive.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
-                        stream_url = progressive[0].get("url")
+    # Daftar kombinasi client untuk fallback jika salah satu client diblokir bot challenge
+    client_combos = [
+        ['tv', 'web_safari'],
+        ['android', 'ios'],
+        ['web', 'mweb'],
+        ['all']
+    ]
 
-            if not stream_url:
-                raise HTTPException(status_code=404, detail="Tidak ada audio stream yang dapat diekstrak")
+    last_error = None
+    for clients in client_combos:
+        extract_params = dict(YDL_OPTS_EXTRACT)
+        extract_params['extractor_args'] = {'youtube': {'player_client': clients}}
+        if os.path.exists(cookie_path):
+            extract_params['cookiefile'] = cookie_path
 
-            payload = {
-                "id": info.get("id"),
-                "title": info.get("title"),
-                "uploader": info.get("uploader") or info.get("channel"),
-                "duration": info.get("duration"),
-                "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{id}/hqdefault.jpg",
-                "stream_url": stream_url,
-                "ad_free": True
-            }
-            STREAM_CACHE[id] = payload
-            return payload
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal mengekstrak audio: {str(e)}")
+        try:
+            with yt_dlp.YoutubeDL(extract_params) as ydl:  # type: ignore
+                info = ydl.extract_info(video_url, download=False)
+                if not info:
+                    continue
+
+                stream_url = info.get("url")
+                if not stream_url and info.get("formats"):
+                    formats_list = info.get("formats") or []
+                    audio_formats = [f for f in formats_list if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
+                    if audio_formats:
+                        audio_formats.sort(key=lambda x: x.get("abr") or 0, reverse=True)
+                        stream_url = audio_formats[0].get("url")
+                    else:
+                        progressive = [f for f in formats_list if f.get("acodec") != "none" and f.get("url")]
+                        if progressive:
+                            progressive.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
+                            stream_url = progressive[0].get("url")
+
+                if stream_url:
+                    payload = {
+                        "id": info.get("id"),
+                        "title": info.get("title"),
+                        "uploader": info.get("uploader") or info.get("channel"),
+                        "duration": info.get("duration"),
+                        "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{id}/hqdefault.jpg",
+                        "stream_url": stream_url,
+                        "ad_free": True
+                    }
+                    STREAM_CACHE[id] = payload
+                    return payload
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise HTTPException(status_code=500, detail=f"Gagal mengekstrak audio: {last_error or 'No stream found'}")
 
 @app.get("/api/related")
 def get_related_tracks(id: str = Query(..., description="ID video YouTube")):
